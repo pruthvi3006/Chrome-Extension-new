@@ -10,8 +10,10 @@ import {
   faCirclePlay,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-// const { Web3AuthNoModal } = await import("@web3auth/no-modal");
+import { Web3Auth } from "@web3auth/modal";
 import ReactDOM from "react-dom";
+import io from "socket.io-client";
+import Starfield from './Starfield';
 // Add TypeScript declaration for chrome extension APIs
 declare const chrome: typeof globalThis.chrome & {
   runtime?: { getURL?: (path: string) => string };
@@ -23,31 +25,90 @@ interface Agent {
   subnet_url: string;
 }
 
+interface ExecutionResult {
+  status: 'pending' | 'running' | 'completed' | 'error';
+  message: string;
+  data?: any;
+}
+
 const App = () => {
   const [isLoading, setIsLoading] = useState<string | null>(null);
   const [searchText, setSearchText] = useState("");
   const [results, setResults] = useState<Record<string, string>>({});
   const [agents, setAgents] = useState<Agent[]>([]);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  // const [web3auth, setWeb3auth] = useState<InstanceType<typeof Web3AuthNoModal> | null>(null);
+  const [web3auth, setWeb3auth] = useState<InstanceType<typeof Web3Auth> | null>(null);
+  const [userPrompt, setUserPrompt] = useState("");
+  const [socket, setSocket] = useState<any>(null);
+  const [executionResults, setExecutionResults] = useState<Record<string, ExecutionResult>>({});
+  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
+  const [view, setView] = useState<'list' | 'execution'>('list');
+  const [executingAgent, setExecutingAgent] = useState<Agent | null>(null);
 
   useEffect(() => {
     const initWeb3Auth = async () => {
-      // try {
-      //   // Minimal config for Web3Auth
-      //   const web3auth = new Web3AuthNoModal({
-      //     clientId: "BCU6qYdYUad5TLmmJwLE3k4TGml3cVUgQRAuGcBmBpIKzQpw3pnr7DcxaKU5e5wGH_WXMFS5tj5wJBKuvuc2WkU",
-      //     web3AuthNetwork:"sapphire_devnet"
-      //   });
-      //   await web3auth.init();
-      //   setWeb3auth(web3auth);
-      // } catch (error) {
-      //   console.error("Error initializing Web3Auth:", error);
-      // }
+      try {
+        // Minimal config for Web3Auth
+        const web3auth = new Web3Auth({
+          clientId: "BCU6qYdYUad5TLmmJwLE3k4TGml3cVUgQRAuGcBmBpIKzQpw3pnr7DcxaKU5e5wGH_WXMFS5tj5wJBKuvuc2WkU",
+          web3AuthNetwork:"sapphire_devnet"
+        });
+        await web3auth.init();
+        console.log("Web3Auth.getUserInfo()",web3auth.getUserInfo());
+        setWeb3auth(web3auth);
+      } catch (error) {
+        console.error("Error initializing Web3Auth:", error);
+      }
     };
 
-    initWeb3Auth();
+   initWeb3Auth();
   }, []);
+
+  // Initialize WebSocket connection to user agent
+  useEffect(() => {
+    const socketInstance = io("https://skynetuseragent-c0n1.stackos.io", {
+      transports: ["websocket"],
+      timeout: 600000,
+    });
+
+    socketInstance.on("connect", () => {
+      console.log("Connected to user agent service");
+    });
+
+    socketInstance.on("disconnect", () => {
+      console.log("Disconnected from user agent service");
+    });
+
+    socketInstance.on("execution-result", (data: any) => {
+      console.log("Received execution result:", data);
+      setExecutionResults(prev => ({
+        ...prev,
+        [data.agentName]: {
+          status: 'completed',
+          message: 'Execution completed successfully',
+          data: data.result
+        }
+      }));
+    });
+
+    socketInstance.on("execution-error", (data: any) => {
+      console.error("Execution error:", data);
+      setExecutionResults(prev => ({
+        ...prev,
+        [data.agentName]: {
+          status: 'error',
+          message: data.error || 'Execution failed'
+        }
+      }));
+    });
+
+    setSocket(socketInstance);
+
+    return () => {
+      socketInstance.disconnect();
+    };
+  }, []);
+
   const logoSrc =
     typeof chrome !== "undefined" && chrome.runtime?.getURL
       ? chrome.runtime.getURL("icons/logo.png")
@@ -86,61 +147,153 @@ const App = () => {
     fetchAgents();
   }, []);
 
-  // const handleLogin = async () => {
-  //   if (!web3auth) {
-  //     console.error("Web3Auth not initialized");
-  //     return;
-  //   }
-  //   try {
-  //     web3auth.connected;
-  //     setIsLoggedIn(true);
-  //   } catch (error) {
-  //     console.error("Error during login:", error);
-  //   }
-  // };
+  const handleLogin = async () => {
+    if (!web3auth) {
+      console.error("Web3Auth not initialized");
+      return;
+    }
+    try {
+      // Trigger Web3Auth login popup with social logins
+      const provider = await web3auth.connect();
+      
+      console.log("Connected to provider:", provider);
+      setIsLoggedIn(true);
+    } catch (error) {
+      console.error("Error during login:", error);
+    }
+  };
 
-  // const handleLogout = async () => {
-  //   if (!web3auth) {
-  //     console.error("Web3Auth not initialized");
-  //     return;
-  //   }
-  //   try {
-  //     await web3auth.logout();
-  //     setIsLoggedIn(false);
-  //   } catch (error) {
-  //     console.error("Error during logout:", error);
-  //   }
-  // };
+  const handleLogout = async () => {
+    if (!web3auth) {
+      console.error("Web3Auth not initialized");
+      return;
+    }
+    try {
+      await web3auth.logout();
+      setIsLoggedIn(false);
+    } catch (error) {
+      console.error("Error during logout:", error);
+    }
+  };
 
-  // Fetch and display agent workflow (subnet_list) when Run is clicked
+  const agentIcons: Record<string, JSX.Element> = {
+    'TL;DR': <FontAwesomeIcon icon={faBolt} style={{ color: '#fff', background: '#f43f5e', borderRadius: '8px', padding: '6px' }} />, // Example
+    'Deep Research': <FontAwesomeIcon icon={faSearch} style={{ color: '#fff', background: '#6366f1', borderRadius: '8px', padding: '6px' }} />, // Example
+    'Research People': <FontAwesomeIcon icon={faFileAlt} style={{ color: '#fff', background: '#0ea5e9', borderRadius: '8px', padding: '6px' }} />, // Example
+    'Generate a Podcast': <FontAwesomeIcon icon={faFeather} style={{ color: '#fff', background: '#a21caf', borderRadius: '8px', padding: '6px' }} />, // Example
+    'LinkedIn': <FontAwesomeIcon icon={faFileAlt} style={{ color: '#fff', background: '#2563eb', borderRadius: '8px', padding: '6px' }} />, // Placeholder for LinkedIn
+  };
+
   const handleRunAgent = async (agentName: string, agentId: string) => {
     if (!isLoggedIn) {
       alert("Please login to use the agents");
       return;
     }
-    setIsLoading(agentName);
-    setResults((prev) => ({ ...prev, [agentName]: "Processing..." }));
+    const agent = agents.find(a => a.subnet_name === agentName);
+    if (agent) {
+      setExecutingAgent(agent);
+      setView('execution');
+    }
+  };
+
+  const handleBackToList = () => {
+    setView('list');
+    setExecutingAgent(null);
+    setSelectedAgent(null);
+    setUserPrompt("");
+  };
+
+  // Execute the agent workflow with user prompt
+  const handleExecuteWorkflow = async () => {
+    if (!selectedAgent || !userPrompt.trim() || !socket || !web3auth) {
+      alert("Please provide a prompt and ensure you're logged in");
+      return;
+    }
+
+    setIsLoading(selectedAgent.subnet_name);
+    setExecutionResults(prev => ({
+      ...prev,
+      [selectedAgent.subnet_name]: {
+        status: 'pending',
+        message: 'Fetching agent workflow...'
+      }
+    }));
+
     try {
+      // Step 1: Get the agent workflow (subnet_list)
       const response = await fetch(
-        `https://skynetagent-c0n525.stackos.io/agents/${agentId}`
+        `https://skynetagent-c0n525.stackos.io/agents/${selectedAgent.subnet_url}`
       );
+      
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
+      
       const data = await response.json();
-      // Display the subnet_list (workflow) as JSON for now
-      setResults((prev) => ({
+      const subnet_list = data.subnet_list;
+
+      if (!subnet_list) {
+        throw new Error("No workflow found for this agent");
+      }
+
+      setExecutionResults(prev => ({
         ...prev,
-        [agentName]: JSON.stringify(data.subnet_list, null, 2),
+        [selectedAgent.subnet_name]: {
+          status: 'running',
+          message: 'Preparing execution...'
+        }
       }));
-    } catch (error) {
-      setResults((prev) => ({
+
+      // Step 2: Get user signature for authentication
+      const provider = await web3auth.connect();
+      if (!provider) {
+        throw new Error("Failed to connect to Web3Auth provider");
+      }
+      const signature = await provider.request({
+        method: "personal_sign",
+        params: [userPrompt, await provider.request({ method: "eth_accounts" })]
+      });
+
+      // Step 3: Prepare payload for user agent
+      const payload = {
+        prompt: userPrompt,
+        userAuthPayload: signature,
+        accountNFT: {
+          collectionID: "0",
+          nftID: "0", // Default NFT ID
+        },
+        workflow: subnet_list,
+      };
+
+      // Step 4: Send to user agent via WebSocket
+      socket.emit("process-request", payload);
+
+      setResults(prev => ({
         ...prev,
-        [agentName]: "Error fetching workflow",
+        [selectedAgent.subnet_name]: `Executing workflow for: "${userPrompt}"\n\nWorkflow:\n${JSON.stringify(subnet_list, null, 2)}`
+      }));
+
+    } catch (error) {
+      console.error("Error executing workflow:", error);
+      setExecutionResults(prev => ({
+        ...prev,
+        [selectedAgent.subnet_name]: {
+          status: 'error',
+          message: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`
+        }
+      }));
+      setResults(prev => ({
+        ...prev,
+        [selectedAgent.subnet_name]: `Error executing workflow: ${error instanceof Error ? error.message : 'Unknown error'}`
       }));
     } finally {
       setIsLoading(null);
     }
+  };
+
+  const handleCancelExecution = () => {
+    setSelectedAgent(null);
+    setUserPrompt("");
   };
 
   const handleBack = () => {
@@ -156,196 +309,278 @@ const App = () => {
       style={{
         width: "100%",
         height: "100%",
-        backgroundColor: "#1a1a1a",
+        backgroundColor: "#18181b",
         color: "white",
         fontFamily: "sans-serif",
         overflowY: "auto",
+        borderRadius: '16px',
+        boxShadow: '0 2px 16px #000a',
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "16px",
-          borderBottom: "1px solid #3f3f46",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          <img
-            src={logoSrc}
-            alt="SkyStudio Logo"
-            style={{ width: "24px", height: "24px", borderRadius: "4px" }}
-          />
-          <span style={{ fontSize: "14px", fontWeight: 600 }}>
-            SkyAgents Hub
-          </span>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-          <div style={{ fontSize: "14px", color: "#a1a1aa" }}>
-            Browse Agents
-          </div>
-          {isLoggedIn ? (
-            <button
-              // onClick={handleLogout}
-              style={{
-                background: "#ef4444",
-                border: "none",
-                color: "#ffffff",
-                fontSize: "12px",
-                borderRadius: "4px",
-                padding: "6px 12px",
-                cursor: "pointer",
-              }}
-            >
-              Logout
-            </button>
-          ) : (
-            <button
-              // onClick={handleLogin}
-              style={{
-                background: "#22c55e",
-                border: "none",
-                color: "#ffffff",
-                fontSize: "12px",
-                borderRadius: "4px",
-                padding: "6px 12px",
-                cursor: "pointer",
-              }}
-            >
-              Login
-            </button>
-          )}
-        </div>
-      </div>
-
-      <button
-        onClick={handleBack}
-        style={{
-          margin: "16px",
-          background: "transparent",
-          border: "1px solid #3f3f46",
-          color: "#ffffff",
-          fontSize: "12px",
-          borderRadius: "4px",
-          padding: "4px 8px",
-          cursor: "pointer",
-        }}
-      >
-        <FontAwesomeIcon icon={faChevronLeft} size="xs" /> BACK
-      </button>
-
-      <div style={{ padding: "0 16px" }}>
-        <input
-          type="text"
-          placeholder="Search agents..."
-          value={searchText}
-          onChange={(e) => setSearchText(e.target.value)}
-          style={{
-            width: "100%",
-            padding: "8px",
-            borderRadius: "6px",
-            border: "1px solid #3f3f46",
-            backgroundColor: "#27272a",
-            color: "white",
-            fontSize: "12px",
-            marginBottom: "12px",
-          }}
-        />
-      </div>
-
-      {filteredAgents.length > 0 ? (
-        <div style={{ padding: "0 16px" }}>
-          {filteredAgents.map((agent, index) => (
-            <div
-              key={index}
-              style={{
-                backgroundColor: "#27272a",
-                padding: "12px",
-                borderRadius: "8px",
-                marginBottom: "12px",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                <div
-                  style={{ display: "flex", alignItems: "center", gap: "12px" }}
-                >
-                  <div
-                    style={{
-                      backgroundColor: "#ef4444",
-                      borderRadius: "12px",
-                      padding: "10px",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    <FontAwesomeIcon icon={faFeather} size="lg" />
-                  </div>
-                  <div>
-                    <div style={{ fontWeight: 600, fontSize: "14px" }}>
-                      {agent.subnet_name}
-                    </div>
-                    <div style={{ fontSize: "12px", color: "#a1a1aa" }}>
-                      {agent.description}
-                    </div>
-                  </div>
-                </div>
+      {view === 'list' && (
+        <>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "16px",
+              borderBottom: "1px solid #3f3f46",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <img
+                src={chrome.runtime.getURL("public/icons/logo.png")}
+                alt="SkyStudio Logo"
+                style={{ width: "24px", height: "24px", borderRadius: "4px" }}
+              />
+              <span style={{ fontSize: "14px", fontWeight: 600 }}>
+                SkyAgents Hub
+              </span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+              <div style={{ fontSize: "14px", color: "#a1a1aa" }}>
+                Browse Agents
+              </div>
+              {isLoggedIn ? (
                 <button
-                  onClick={() =>
-                    handleRunAgent(agent.subnet_name, agent.subnet_url)
-                  }
-                  disabled={!isLoggedIn}
+                  onClick={handleLogout}
                   style={{
-                    background: isLoggedIn ? "#3f3f46" : "#27272a",
-                    border: "1px solid #3f3f46",
-                    color: isLoggedIn ? "#ffffff" : "#6b7280",
+                    background: "#ef4444",
+                    border: "none",
+                    color: "#ffffff",
                     fontSize: "12px",
                     borderRadius: "4px",
                     padding: "6px 12px",
-                    cursor: isLoggedIn ? "pointer" : "not-allowed",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "6px",
+                    cursor: "pointer",
                   }}
                 >
-                  <FontAwesomeIcon icon={faCirclePlay} />
-                  {isLoggedIn ? "Run" : "Login Required"}
+                  Logout
                 </button>
-              </div>
-              {results[agent.subnet_name] && (
-                <div
+              ) : (
+                <button
+                  onClick={handleLogin}
                   style={{
-                    marginTop: "12px",
-                    padding: "12px",
-                    backgroundColor: "#1a1a1a",
-                    borderRadius: "4px",
+                    background: "#22c55e",
+                    border: "none",
+                    color: "#ffffff",
                     fontSize: "12px",
-                    whiteSpace: "pre-wrap",
+                    borderRadius: "4px",
+                    padding: "6px 12px",
+                    cursor: "pointer",
                   }}
                 >
-                  {results[agent.subnet_name]}
-                </div>
+                  Login
+                </button>
               )}
             </div>
-          ))}
-        </div>
-      ) : (
-        <div
-          style={{
-            padding: "16px",
-            textAlign: "center",
-            color: "#a1a1aa",
-            fontSize: "14px",
-          }}
-        >
-          No agents found
+          </div>
+
+          <button
+            onClick={handleBack}
+            style={{
+              margin: "16px",
+              background: "transparent",
+              border: "1px solid #3f3f46",
+              color: "#ffffff",
+              fontSize: "12px",
+              borderRadius: "4px",
+              padding: "4px 8px",
+              cursor: "pointer",
+            }}
+          >
+            <FontAwesomeIcon icon={faChevronLeft} size="xs" /> BACK
+          </button>
+
+          <div style={{ padding: "0 16px" }}>
+            <input
+              type="text"
+              placeholder="Search agents..."
+              value={searchText}
+              onChange={(e) => setSearchText(e.target.value)}
+              style={{
+                width: "100%",
+                padding: "8px",
+                borderRadius: "6px",
+                border: "1px solid #3f3f46",
+                backgroundColor: "#27272a",
+                color: "white",
+                fontSize: "12px",
+                marginBottom: "12px",
+              }}
+            />
+          </div>
+
+          {filteredAgents.length > 0 ? (
+            <div style={{ padding: "0 16px" }}>
+              {filteredAgents.map((agent, index) => (
+                <div
+                  key={index}
+                  style={{
+                    backgroundColor: "#27272a",
+                    padding: "12px",
+                    borderRadius: "8px",
+                    marginBottom: "12px",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <div
+                      style={{ display: "flex", alignItems: "center", gap: "12px" }}
+                    >
+                      <div
+                        style={{
+                          backgroundColor: "#ef4444",
+                          borderRadius: "12px",
+                          padding: "10px",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        <FontAwesomeIcon icon={faFeather} size="lg" />
+                      </div>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: "14px" }}>
+                          {agent.subnet_name}
+                        </div>
+                        <div style={{ fontSize: "12px", color: "#a1a1aa" }}>
+                          {agent.description}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() =>
+                        handleRunAgent(agent.subnet_name, agent.subnet_url)
+                      }
+                      disabled={!isLoggedIn}
+                      style={{
+                        background: isLoggedIn ? "#3f3f46" : "#27272a",
+                        border: "1px solid #3f3f46",
+                        color: isLoggedIn ? "#ffffff" : "#6b7280",
+                        fontSize: "12px",
+                        borderRadius: "4px",
+                        padding: "6px 12px",
+                        cursor: isLoggedIn ? "pointer" : "not-allowed",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                      }}
+                    >
+                      <FontAwesomeIcon icon={faCirclePlay} />
+                      {isLoggedIn ? "Run" : "Login Required"}
+                    </button>
+                  </div>
+                  {results[agent.subnet_name] && (
+                    <div
+                      style={{
+                        marginTop: "12px",
+                        padding: "12px",
+                        backgroundColor: "#1a1a1a",
+                        borderRadius: "4px",
+                        fontSize: "12px",
+                        whiteSpace: "pre-wrap",
+                      }}
+                    >
+                      {results[agent.subnet_name]}
+                    </div>
+                  )}
+                  {/* Execution Results */}
+                  {executionResults[agent.subnet_name] && (
+                    <div
+                      style={{
+                        marginTop: "12px",
+                        padding: "12px",
+                        backgroundColor: "#1a1a1a",
+                        borderRadius: "4px",
+                        fontSize: "12px",
+                        border: `1px solid ${
+                          executionResults[agent.subnet_name].status === 'error' ? "#dc2626" : 
+                          executionResults[agent.subnet_name].status === 'completed' ? "#16a34a" : "#3b82f6"
+                        }`,
+                      }}
+                    >
+                      <div style={{ 
+                        fontWeight: 600, 
+                        marginBottom: "8px",
+                        color: executionResults[agent.subnet_name].status === 'error' ? "#dc2626" : 
+                               executionResults[agent.subnet_name].status === 'completed' ? "#16a34a" : "#3b82f6"
+                      }}>
+                        Status: {executionResults[agent.subnet_name].status.toUpperCase()}
+                      </div>
+                      <div style={{ marginBottom: "8px" }}>
+                        {executionResults[agent.subnet_name].message}
+                      </div>
+                      {executionResults[agent.subnet_name].data && (
+                        <div style={{ 
+                          backgroundColor: "#27272a", 
+                          padding: "8px", 
+                          borderRadius: "4px",
+                          whiteSpace: "pre-wrap"
+                        }}>
+                          {JSON.stringify(executionResults[agent.subnet_name].data, null, 2)}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div
+              style={{
+                padding: "16px",
+                textAlign: "center",
+                color: "#a1a1aa",
+                fontSize: "14px",
+              }}
+            >
+              No agents found
+            </div>
+          )}
+        </>
+      )}
+      {view === 'execution' && executingAgent && (
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          {/* Top Bar */}
+          <div style={{
+            display: 'flex', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid #27272a', background: '#18181b',
+          }}>
+            <button onClick={handleBackToList} style={{ background: 'none', border: 'none', color: '#fff', fontSize: 20, marginRight: 12, cursor: 'pointer' }}>
+              <FontAwesomeIcon icon={faChevronLeft} />
+            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              {agentIcons[executingAgent.subnet_name] || <FontAwesomeIcon icon={faFileAlt} style={{ color: '#fff', background: '#27272a', borderRadius: '8px', padding: '6px' }} />}
+              <span style={{ fontWeight: 700, fontSize: 18 }}>{executingAgent.subnet_name.length > 20 ? executingAgent.subnet_name.slice(0, 20) + '…' : executingAgent.subnet_name}</span>
+            </div>
+            <div style={{ marginLeft: 'auto' }}>
+              <FontAwesomeIcon icon={faXmark} style={{ color: '#a1a1aa', fontSize: 20, cursor: 'pointer' }} />
+            </div>
+          </div>
+          {/* Animated Starfield */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#18181b' }}>
+            <Starfield width={220} height={220} numStars={350} />
+            {/* Background Message Section */}
+            <div style={{ width: '90%', maxWidth: 400, background: 'none', color: '#fff', fontSize: 16 }}>
+              <div style={{ fontWeight: 600, marginBottom: 8 }}>
+                <FontAwesomeIcon icon={faCirclePlay} spin style={{ marginRight: 8, color: '#a1a1aa' }} />
+                Background Message
+              </div>
+              <div style={{ height: 6, background: '#27272a', borderRadius: 4, marginBottom: 8, width: '100%' }}>
+                <div style={{ width: '40%', height: '100%', background: '#52525b', borderRadius: 4, transition: 'width 0.5s' }} />
+              </div>
+              <div style={{ color: '#a1a1aa', fontSize: 14, marginTop: 4 }}>
+                Resolving variables<br />
+                Sending resolved message: "You are an expert at…"<br />
+                Waiting for model response...
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

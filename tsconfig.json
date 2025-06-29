@@ -16,6 +16,6 @@
     "noEmit": false,
     "jsx": "react-jsx"
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "dist/background.ts"],
   "exclude": ["node_modules", "dist"]
 } 
