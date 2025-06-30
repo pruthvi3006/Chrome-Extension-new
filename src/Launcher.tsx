@@ -2,6 +2,12 @@ import React, { useEffect, useRef, useState } from "react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faGrip } from "@fortawesome/free-solid-svg-icons";
 
+declare const chrome: typeof globalThis.chrome & {
+  runtime?: {
+    getURL?: (path: string) => string;
+    sendMessage?: (...args: any[]) => void;
+  };
+};
 const Launcher: React.FC = () => {
   const ref = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -41,7 +47,7 @@ const Launcher: React.FC = () => {
 
   const handleClick = () => {
     console.log("open my sidepanel");
-    chrome.runtime.sendMessage({ action: 'openSidePanel' });
+    chrome.runtime?.sendMessage?.({ action: 'openSidePanel' });
   };
 
   return (
@@ -78,7 +84,7 @@ const Launcher: React.FC = () => {
         }}
       >
         <img
-          src={chrome.runtime.getURL("public/icons/logo.png")}
+          src={chrome.runtime?.getURL?.("/logo.png")}
           alt="Skynet logo"
           style={{
             width: "38px",

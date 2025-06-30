@@ -14,6 +14,8 @@ import { Web3Auth } from "@web3auth/modal";
 import ReactDOM from "react-dom";
 import io from "socket.io-client";
 import Starfield from './Starfield';
+import { toast } from "react-hot-toast";
+import { Toaster } from "react-hot-toast";
 // Add TypeScript declaration for chrome extension APIs
 declare const chrome: typeof globalThis.chrome & {
   runtime?: { getURL?: (path: string) => string };
@@ -44,6 +46,7 @@ const App = () => {
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [view, setView] = useState<'list' | 'execution'>('list');
   const [executingAgent, setExecutingAgent] = useState<Agent | null>(null);
+  const [selectedNft, setSelectedNft] = useState<any>(null);
 
   useEffect(() => {
     const initWeb3Auth = async () => {
@@ -75,8 +78,8 @@ const App = () => {
       console.log("Connected to user agent service");
     });
 
-    socketInstance.on("disconnect", () => {
-      console.log("Disconnected from user agent service");
+    socketInstance.on("disconnect", (reason: any) => {
+      console.log("Disconnected from user agent service. Reason:", reason);
     });
 
     socketInstance.on("execution-result", (data: any) => {
@@ -102,6 +105,21 @@ const App = () => {
       }));
     });
 
+    // Listen for any other events that might come back
+    socketInstance.on("message", (data: any) => {
+      console.log("WebSocket message received:", data);
+    });
+
+    // Listen for error events
+    socketInstance.on("error", (error: any) => {
+      console.error("WebSocket error:", error);
+    });
+
+    // Listen for connect_error events
+    socketInstance.on("connect_error", (error: any) => {
+      console.error("WebSocket connection error:", error);
+    });
+
     setSocket(socketInstance);
 
     return () => {
@@ -111,8 +129,8 @@ const App = () => {
 
   const logoSrc =
     typeof chrome !== "undefined" && chrome.runtime?.getURL
-      ? chrome.runtime.getURL("icons/logo.png")
-      : "icons/logo.png";
+      ? chrome.runtime.getURL("/logo.png")
+      : "/logo.png";
   useEffect(() => {
     const fetchAgents = async () => {
       setIsLoading("Fetching agents...");
@@ -222,7 +240,7 @@ const App = () => {
     try {
       // Step 1: Get the agent workflow (subnet_list)
       const response = await fetch(
-        `https://skynetagent-c0n525.stackos.io/agents/${selectedAgent.subnet_url}`
+        `https://skynetagent-c0n525.stackos.io/api/agents/${selectedAgent.subnet_url}`
       );
       
       if (!response.ok) {
@@ -230,11 +248,35 @@ const App = () => {
       }
       
       const data = await response.json();
-      const subnet_list = data.subnet_list;
+      console.log("Full API response:", data);
+      console.log("Response keys:", Object.keys(data));
+      
+      // The subnet_list is nested inside data.data.subnet_list
+      const subnet_list = data.data?.subnet_list;
+      console.log("subnet_list value:", subnet_list);
 
       if (!subnet_list) {
+        console.error("No subnet_list found in response. Available fields:", Object.keys(data));
         throw new Error("No workflow found for this agent");
       }
+
+      // Print the workflow object to console
+      console.log("Workflow object:", subnet_list);
+
+      // Transform workflow to server-expected format
+      const transformedWorkflow = subnet_list.map((step: any, index: number) => ({
+        stepId: step.id,
+        stepNumber: index + 1,
+        serviceName: step.subnetName,
+        serviceUrl: step.subnetURL,
+        prompt: step.prompt,
+        inputItemID: step.inputItemID || [],
+        output: step.output,
+        systemPrompt: step.systemPrompt,
+        description: step.description
+      }));
+
+      console.log("Transformed workflow:", transformedWorkflow);
 
       setExecutionResults(prev => ({
         ...prev,
@@ -249,24 +291,107 @@ const App = () => {
       if (!provider) {
         throw new Error("Failed to connect to Web3Auth provider");
       }
+      
+      // Get the user's account address
+      const accounts = await provider.request({ method: "eth_accounts" }) as string[];
+      if (!accounts || accounts.length === 0) {
+        throw new Error("No accounts found. Please connect your wallet.");
+      }
+      
+      const userAddress = accounts[0];
+      console.log("User address:", userAddress);
+      
+      // Generate signature with proper message format
+      const messageToSign = `Execute workflow: ${userPrompt}`;
       const signature = await provider.request({
         method: "personal_sign",
-        params: [userPrompt, await provider.request({ method: "eth_accounts" })]
+        params: [messageToSign, userAddress]
       });
+      
+      console.log("Message signed:", messageToSign);
+      console.log("Generated signature:", signature);
 
-      // Step 3: Prepare payload for user agent
+      // Step 3: Prepare payload for user agent - try multiple workflow formats
       const payload = {
         prompt: userPrompt,
-        userAuthPayload: signature,
+        userAuthPayload: signature, // Use original field name
+        userAddress: userAddress, // Add user address
         accountNFT: {
           collectionID: "0",
-          nftID: "0", // Default NFT ID
+          nftID: selectedNft || "0", // Use selected NFT or default
         },
-        workflow: subnet_list,
+        workflow: transformedWorkflow, // Use transformed workflow
+        workflowString: JSON.stringify(transformedWorkflow), // Also send as string
+        originalWorkflow: subnet_list, // Keep original as backup
+        agentName: selectedAgent.subnet_name,
+        workflowSteps: transformedWorkflow.length, // Add step count
       };
 
+      console.log("Trying with proper authentication fields...");
+
+      // Validate workflow structure
+      console.log("Validating workflow structure...");
+      if (!Array.isArray(subnet_list)) {
+        throw new Error("Workflow must be an array");
+      }
+      
+      subnet_list.forEach((step, index) => {
+        console.log(`Step ${index + 1}:`, {
+          id: step.id,
+          subnetName: step.subnetName,
+          subnetURL: step.subnetURL,
+          prompt: step.prompt
+        });
+      });
+
+      console.log("Sending payload to WebSocket:", payload);
+      console.log("WebSocket connection state:", socket.connected);
+
       // Step 4: Send to user agent via WebSocket
-      socket.emit("process-request", payload);
+      if (!socket.connected) {
+        console.log("WebSocket not connected, attempting to reconnect...");
+        socket.connect();
+        
+        // Wait for connection to be established
+        await new Promise((resolve) => {
+          socket.once("connect", () => {
+            console.log("WebSocket reconnected successfully");
+            resolve(true);
+          });
+          
+          // Timeout after 5 seconds
+          setTimeout(() => {
+            console.log("WebSocket connection timeout");
+            resolve(false);
+          }, 5000);
+        });
+      }
+
+      if (socket.connected) {
+        try {
+          // Try the original event name
+          socket.emit("process-request", payload, (response: any) => {
+            console.log("Server response to process-request:", response);
+            if (response && response.error) {
+              console.error("Server returned error:", response.error);
+            }
+          });
+          
+          // Also try alternative event names in case the server expects different events
+          setTimeout(() => {
+            console.log("Trying alternative event names...");
+            socket.emit("execute-workflow", payload);
+            socket.emit("run-agent", payload);
+          }, 1000);
+          
+          console.log("Payload sent successfully");
+        } catch (emitError) {
+          console.error("Error emitting to WebSocket:", emitError);
+          throw emitError;
+        }
+      } else {
+        throw new Error("Failed to establish WebSocket connection");
+      }
 
       setResults(prev => ({
         ...prev,
@@ -300,6 +425,30 @@ const App = () => {
     window.close();
   };
 
+  // Add testAgent function for agent testing with pre-checks
+  const testAgent = async () => {
+    if (!isLoggedIn) {
+      toast.error("Please login to your wallet first");
+      return;
+    }
+    if (!executingAgent) {
+      toast.error('Please select an agent first');
+      return;
+    }
+    if (!selectedNft) {
+      toast.error('Please select an NFT first');
+      return;
+    }
+    if (!userPrompt.trim()) {
+      toast.error('Please enter a prompt for the test');
+      return;
+    }
+    
+    // Set the selected agent and execute the workflow
+    setSelectedAgent(executingAgent);
+    await handleExecuteWorkflow();
+  };
+
   const filteredAgents = agents.filter((agent) =>
     agent.subnet_name.toLowerCase().includes(searchText.toLowerCase())
   );
@@ -317,6 +466,7 @@ const App = () => {
         boxShadow: '0 2px 16px #000a',
       }}
     >
+      <Toaster />
       {view === 'list' && (
         <>
           <div
@@ -330,7 +480,7 @@ const App = () => {
           >
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
               <img
-                src={chrome.runtime.getURL("public/icons/logo.png")}
+                src={logoSrc}
                 alt="SkyStudio Logo"
                 style={{ width: "24px", height: "24px", borderRadius: "4px" }}
               />
@@ -561,6 +711,61 @@ const App = () => {
             <div style={{ marginLeft: 'auto' }}>
               <FontAwesomeIcon icon={faXmark} style={{ color: '#a1a1aa', fontSize: 20, cursor: 'pointer' }} />
             </div>
+          </div>
+          {/* NFT Selection Dropdown */}
+          <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            <select
+              value={selectedNft || ''}
+              onChange={e => setSelectedNft(e.target.value || null)}
+              style={{
+                width: '100%',
+                maxWidth: 400,
+                padding: '10px',
+                borderRadius: '6px',
+                border: '1px solid #3f3f46',
+                backgroundColor: '#27272a',
+                color: 'white',
+                fontSize: '14px',
+                marginBottom: '16px',
+              }}
+            >
+              <option value="">Select NFT</option>
+              <option value="nft1">NFT #1</option>
+              <option value="nft2">NFT #2</option>
+              <option value="nft3">NFT #3</option>
+            </select>
+            <input
+              type="text"
+              placeholder="Enter your prompt..."
+              value={userPrompt}
+              onChange={e => setUserPrompt(e.target.value)}
+              style={{
+                width: '100%',
+                maxWidth: 400,
+                padding: '10px',
+                borderRadius: '6px',
+                border: '1px solid #3f3f46',
+                backgroundColor: '#27272a',
+                color: 'white',
+                fontSize: '14px',
+                marginBottom: '16px',
+              }}
+            />
+            <button
+              onClick={testAgent}
+              style={{
+                background: '#3b82f6',
+                border: 'none',
+                color: '#fff',
+                fontSize: '14px',
+                borderRadius: '4px',
+                padding: '8px 20px',
+                cursor: 'pointer',
+                marginBottom: '24px',
+              }}
+            >
+              Test Agent
+            </button>
           </div>
           {/* Animated Starfield */}
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#18181b' }}>
