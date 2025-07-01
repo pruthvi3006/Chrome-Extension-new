@@ -22,33 +22,37 @@ declare const chrome: typeof globalThis.chrome & {
   runtime?: { getURL?: (path: string) => string };
 };
 
+// Define the Agent interface to describe agent objects
 interface Agent {
-  subnet_name: string;
-  description: string;
-  subnet_url: string;
+  subnet_name: string; // Name of the agent/subnet
+  description: string; // Description of the agent
+  subnet_url: string;  // Unique identifier or URL for the agent
 }
 
+// Define the structure for execution results
 interface ExecutionResult {
-  status: 'pending' | 'running' | 'completed' | 'error';
-  message: string;
-  data?: any;
+  status: 'pending' | 'running' | 'completed' | 'error'; // Current status
+  message: string; // Status message
+  data?: any;      // Optional data returned from execution
 }
 
 const App = () => {
-  const [isLoading, setIsLoading] = useState<string | null>(null);
-  const [searchText, setSearchText] = useState("");
-  const [results, setResults] = useState<Record<string, string>>({});
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [web3auth, setWeb3auth] = useState<InstanceType<typeof Web3Auth> | null>(null);
-  const [userPrompt, setUserPrompt] = useState("");
-  const [socket, setSocket] = useState<any>(null);
-  const [executionResults, setExecutionResults] = useState<Record<string, ExecutionResult>>({});
-  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
-  const [view, setView] = useState<'list' | 'execution'>('list');
-  const [executingAgent, setExecutingAgent] = useState<Agent | null>(null);
-  const [selectedNft, setSelectedNft] = useState<any>(null);
+  // State variables for UI and logic
+  const [isLoading, setIsLoading] = useState<string | null>(null); // Loading state for async actions
+  const [searchText, setSearchText] = useState(""); // Search input for filtering agents
+  const [results, setResults] = useState<Record<string, string>>({}); // Stores results for each agent
+  const [agents, setAgents] = useState<Agent[]>([]); // List of available agents
+  const [isLoggedIn, setIsLoggedIn] = useState(false); // User login state
+  const [web3auth, setWeb3auth] = useState<InstanceType<typeof Web3Auth> | null>(null); // Web3Auth instance
+  const [userPrompt, setUserPrompt] = useState(""); // User's input prompt for agent execution
+  const [socket, setSocket] = useState<any>(null); // WebSocket connection instance
+  const [executionResults, setExecutionResults] = useState<Record<string, ExecutionResult>>({}); // Stores execution results for agents
+  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null); // Currently selected agent for execution
+  const [view, setView] = useState<'list' | 'execution'>('list'); // UI view state: list of agents or execution view
+  const [executingAgent, setExecutingAgent] = useState<Agent | null>(null); // Agent currently being executed
+  const [selectedNft, setSelectedNft] = useState<any>(null); // Selected NFT for execution (if required)
 
+  // Initialize Web3Auth for user authentication (runs once on mount)
   useEffect(() => {
     const initWeb3Auth = async () => {
       try {
@@ -68,21 +72,25 @@ const App = () => {
    initWeb3Auth();
   }, []);
 
-  // Initialize WebSocket connection to user agent
+  // Initialize WebSocket connection to user agent backend (runs once on mount)
   useEffect(() => {
+    // Create a socket.io-client instance to connect to the backend WebSocket server
     const socketInstance = io("https://skynetuseragent-c0n1.stackos.io", {
-      transports: ["websocket"],
-      timeout: 600000,
+      transports: ["websocket"], // Force use of WebSocket protocol only
+      timeout: 600000,           // Set connection timeout to 10 minutes
     });
 
+    // Event: Successfully connected to the WebSocket server
     socketInstance.on("connect", () => {
       console.log("Connected to user agent service");
     });
 
+    // Event: Disconnected from the WebSocket server
     socketInstance.on("disconnect", (reason: any) => {
       console.log("Disconnected from user agent service. Reason:", reason);
     });
 
+    // Event: Received execution result from the server
     socketInstance.on("execution-result", (data: any) => {
       console.log("Received execution result:", data);
       setExecutionResults(prev => ({
@@ -95,6 +103,7 @@ const App = () => {
       }));
     });
 
+    // Event: Received execution error from the server
     socketInstance.on("execution-error", (data: any) => {
       console.error("Execution error:", data);
       setExecutionResults(prev => ({
@@ -106,23 +115,25 @@ const App = () => {
       }));
     });
 
-    // Listen for any other events that might come back
+    // Event: Received a generic message from the server
     socketInstance.on("message", (data: any) => {
       console.log("WebSocket message received:", data);
     });
 
-    // Listen for error events
+    // Event: WebSocket error
     socketInstance.on("error", (error: any) => {
       console.error("WebSocket error:", error);
     });
 
-    // Listen for connect_error events
+    // Event: WebSocket connection error
     socketInstance.on("connect_error", (error: any) => {
       console.error("WebSocket connection error:", error);
     });
 
+    // Store the socket instance in state for use elsewhere
     setSocket(socketInstance);
 
+    // Cleanup: disconnect socket when component unmounts
     return () => {
       socketInstance.disconnect();
     };
@@ -304,91 +315,33 @@ const App = () => {
         method: "personal_sign",
         params: [messageToSign, userAddress]
       });
-      // Step 3: Prepare payload as per user request
-      const sig = signature as { data: string };
+      console.log("Signature from personal_sign:", signature, typeof signature);
       const payload = {
         prompt: userPrompt,
-        userAuthPayload: sig.data,
+        userAuthPayload: signature,
         accountNFT: {
           collectionID: "0",
           nftID: selectedNft?.toString() || "0",
         },
         workflow: subnet_list,
       };
-
-      console.log("Trying with proper authentication fields...");
-
-      // Validate workflow structure
-      console.log("Validating workflow structure...");
-      if (!Array.isArray(subnet_list)) {
-        throw new Error("Workflow must be an array");
-      }
       
-      subnet_list.forEach((step, index) => {
-        console.log(`Step ${index + 1}:`, {
-          id: step.id,
-          subnetName: step.subnetName,
-          subnetURL: step.subnetURL,
-          prompt: step.prompt
-        });
-      });
-
-      console.log("Sending payload to WebSocket:", payload);
-      console.log("WebSocket connection state:", socket.connected);
-
-      // Step 4: Send to user agent via WebSocket (REPLACED WITH AXIOS)
-      // Instead of socket.emit, POST to each step's subnet_url
-      type WorkflowResponse = {
-        stepId: string;
-        serviceUrl: string;
-        response?: any;
-        error?: any;
-      };
-      const workflowResponses: WorkflowResponse[] = [];
-      for (const step of transformedWorkflow) {
-        if (!step.serviceUrl) continue;
-        try {
-          const resp = await axios.post(
-            step.serviceUrl,
-            payload,
-            { headers: { 'Content-Type': 'application/json' } }
-          );
-          workflowResponses.push({
-            stepId: step.stepId,
-            serviceUrl: step.serviceUrl,
-            response: resp.data,
-          });
-        } catch (err) {
-          let errorMsg = "Unknown error";
-          if (err && typeof err === "object") {
-            if ("response" in err && err.response && typeof err.response === "object" && "data" in err.response) {
-              errorMsg = (err as any).response.data;
-            } else if ("message" in err) {
-              errorMsg = (err as any).message;
-            } else {
-              errorMsg = JSON.stringify(err);
+      console.log("Emitting process-request with payload:", payload);
+      if (socket && socket.connected) {
+        socket.emit("process-request", payload, (response: any) => {
+          console.log("Socket server response to process-request:", response);
+          setExecutionResults(prev => ({
+            ...prev,
+            [selectedAgent.subnet_name]: {
+              status: response?.error ? 'error' : 'completed',
+              message: response?.error ? response.error : 'Execution completed successfully',
+              data: response?.result || response,
             }
-          }
-          workflowResponses.push({
-            stepId: step.stepId,
-            serviceUrl: step.serviceUrl,
-            error: errorMsg,
-          });
-        }
+          }));
+        });
+      } else {
+        console.error("Socket is not connected");
       }
-      setExecutionResults(prev => ({
-        ...prev,
-        [selectedAgent.subnet_name]: {
-          status: 'completed',
-          message: 'Execution completed successfully',
-          data: workflowResponses,
-        }
-      }));
-      setResults(prev => ({
-        ...prev,
-        [selectedAgent.subnet_name]: `Executed workflow for: "${userPrompt}"
-\nWorkflow:\n${JSON.stringify(subnet_list, null, 2)}\n\nResponses:\n${JSON.stringify(workflowResponses, null, 2)}`
-      }));
 
     } catch (error) {
       console.error("Error executing workflow:", error);
