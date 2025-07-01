@@ -16,6 +16,7 @@ import io from "socket.io-client";
 import Starfield from './Starfield';
 import { toast } from "react-hot-toast";
 import { Toaster } from "react-hot-toast";
+import axios from "axios";
 // Add TypeScript declaration for chrome extension APIs
 declare const chrome: typeof globalThis.chrome & {
   runtime?: { getURL?: (path: string) => string };
@@ -223,7 +224,7 @@ const App = () => {
 
   // Execute the agent workflow with user prompt
   const handleExecuteWorkflow = async () => {
-    if (!selectedAgent || !userPrompt.trim() || !socket || !web3auth) {
+    if (!selectedAgent || !userPrompt.trim() || !web3auth) {
       alert("Please provide a prompt and ensure you're logged in");
       return;
     }
@@ -291,40 +292,28 @@ const App = () => {
       if (!provider) {
         throw new Error("Failed to connect to Web3Auth provider");
       }
-      
       // Get the user's account address
       const accounts = await provider.request({ method: "eth_accounts" }) as string[];
       if (!accounts || accounts.length === 0) {
         throw new Error("No accounts found. Please connect your wallet.");
       }
-      
       const userAddress = accounts[0];
-      console.log("User address:", userAddress);
-      
       // Generate signature with proper message format
       const messageToSign = `Execute workflow: ${userPrompt}`;
       const signature = await provider.request({
         method: "personal_sign",
         params: [messageToSign, userAddress]
       });
-      
-      console.log("Message signed:", messageToSign);
-      console.log("Generated signature:", signature);
-
-      // Step 3: Prepare payload for user agent - try multiple workflow formats
+      // Step 3: Prepare payload as per user request
+      const sig = signature as { data: string };
       const payload = {
         prompt: userPrompt,
-        userAuthPayload: signature, // Use original field name
-        userAddress: userAddress, // Add user address
+        userAuthPayload: sig.data,
         accountNFT: {
           collectionID: "0",
-          nftID: selectedNft || "0", // Use selected NFT or default
+          nftID: selectedNft?.toString() || "0",
         },
-        workflow: transformedWorkflow, // Use transformed workflow
-        workflowString: JSON.stringify(transformedWorkflow), // Also send as string
-        originalWorkflow: subnet_list, // Keep original as backup
-        agentName: selectedAgent.subnet_name,
-        workflowSteps: transformedWorkflow.length, // Add step count
+        workflow: subnet_list,
       };
 
       console.log("Trying with proper authentication fields...");
@@ -347,55 +336,58 @@ const App = () => {
       console.log("Sending payload to WebSocket:", payload);
       console.log("WebSocket connection state:", socket.connected);
 
-      // Step 4: Send to user agent via WebSocket
-      if (!socket.connected) {
-        console.log("WebSocket not connected, attempting to reconnect...");
-        socket.connect();
-        
-        // Wait for connection to be established
-        await new Promise((resolve) => {
-          socket.once("connect", () => {
-            console.log("WebSocket reconnected successfully");
-            resolve(true);
-          });
-          
-          // Timeout after 5 seconds
-          setTimeout(() => {
-            console.log("WebSocket connection timeout");
-            resolve(false);
-          }, 5000);
-        });
-      }
-
-      if (socket.connected) {
+      // Step 4: Send to user agent via WebSocket (REPLACED WITH AXIOS)
+      // Instead of socket.emit, POST to each step's subnet_url
+      type WorkflowResponse = {
+        stepId: string;
+        serviceUrl: string;
+        response?: any;
+        error?: any;
+      };
+      const workflowResponses: WorkflowResponse[] = [];
+      for (const step of transformedWorkflow) {
+        if (!step.serviceUrl) continue;
         try {
-          // Try the original event name
-          socket.emit("process-request", payload, (response: any) => {
-            console.log("Server response to process-request:", response);
-            if (response && response.error) {
-              console.error("Server returned error:", response.error);
-            }
+          const resp = await axios.post(
+            step.serviceUrl,
+            payload,
+            { headers: { 'Content-Type': 'application/json' } }
+          );
+          workflowResponses.push({
+            stepId: step.stepId,
+            serviceUrl: step.serviceUrl,
+            response: resp.data,
           });
-          
-          // Also try alternative event names in case the server expects different events
-          setTimeout(() => {
-            console.log("Trying alternative event names...");
-            socket.emit("execute-workflow", payload);
-            socket.emit("run-agent", payload);
-          }, 1000);
-          
-          console.log("Payload sent successfully");
-        } catch (emitError) {
-          console.error("Error emitting to WebSocket:", emitError);
-          throw emitError;
+        } catch (err) {
+          let errorMsg = "Unknown error";
+          if (err && typeof err === "object") {
+            if ("response" in err && err.response && typeof err.response === "object" && "data" in err.response) {
+              errorMsg = (err as any).response.data;
+            } else if ("message" in err) {
+              errorMsg = (err as any).message;
+            } else {
+              errorMsg = JSON.stringify(err);
+            }
+          }
+          workflowResponses.push({
+            stepId: step.stepId,
+            serviceUrl: step.serviceUrl,
+            error: errorMsg,
+          });
         }
-      } else {
-        throw new Error("Failed to establish WebSocket connection");
       }
-
+      setExecutionResults(prev => ({
+        ...prev,
+        [selectedAgent.subnet_name]: {
+          status: 'completed',
+          message: 'Execution completed successfully',
+          data: workflowResponses,
+        }
+      }));
       setResults(prev => ({
         ...prev,
-        [selectedAgent.subnet_name]: `Executing workflow for: "${userPrompt}"\n\nWorkflow:\n${JSON.stringify(subnet_list, null, 2)}`
+        [selectedAgent.subnet_name]: `Executed workflow for: "${userPrompt}"
+\nWorkflow:\n${JSON.stringify(subnet_list, null, 2)}\n\nResponses:\n${JSON.stringify(workflowResponses, null, 2)}`
       }));
 
     } catch (error) {
